@@ -51,7 +51,12 @@ module Scientist::Experiment
     def format_observation(observation)
       observation.name + ":\n" +
       if observation.raised?
-        lines = observation.exception.backtrace.map { |line| "    #{line}" }.join("\n")
+          arthur/do-not-use-prepend
+          "  " + observation.exception.inspect + "\n" +
+          observation.exception.backtrace.map { |line| "    " + line }.join("\n")
+      else
+        "  " + observation.cleaned_value.inspect
+            lines = observation.exception.backtrace.map { |line| "    #{line}" }.join("\n")
         "  #{observation.exception.inspect}" + "\n" + lines
       else
         "  #{observation.cleaned_value.inspect}"
