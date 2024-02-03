@@ -8,9 +8,6 @@ class Scientist::Observation
   # The experiment this observation is for
   attr_reader :experiment
 
-  # The instant observation began.
-  attr_reader :now
-
   # The String name of the behavior.
   attr_reader :name
 
@@ -23,19 +20,19 @@ class Scientist::Observation
   # The Float seconds elapsed.
   attr_reader :duration
 
-  def initialize(name, experiment, &block)
+  def initialize(name, experiment, fabricated_duration: nil, &block)
     @name       = name
     @experiment = experiment
-    @now        = Time.now
 
-    starting = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_second)
+    starting = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_second) unless fabricated_duration
     begin
       @value = block.call
     rescue *RESCUES => e
       @exception = e
     end
 
-    @duration = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_second) - starting
+    @duration = fabricated_duration ||
+      Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_second) - starting
 
     freeze
   end
@@ -48,25 +45,34 @@ class Scientist::Observation
 
   # Is this observation equivalent to another?
   #
-  # other      - the other Observation in question
-  # comparator - an optional comparison block. This observation's value and the
-  #              other observation's value are yielded to this to determine
-  #              their equivalency. Block should return true/false.
+  # other            - the other Observation in question
+  # comparator       - an optional comparison proc. This observation's value and the
+  #                    other observation's value are passed to this to determine
+  #                    their equivalency. Proc should return true/false.
+  # error_comparator - an optional comparison proc. This observation's Error and the
+  #                    other observation's Error are passed to this to determine
+  #                    their equivalency. Proc should return true/false.
   #
   # Returns true if:
   #
   # * The values of the observation are equal (using `==`)
   # * The values of the observations are equal according to a comparison
-  #   block, if given
+  #   proc, if given
+  # * The exceptions raised by the observations are equal according to the
+  #   error comparison proc, if given.
   # * Both observations raised an exception with the same class and message.
   #
   # Returns false otherwise.
-  def equivalent_to?(other, &comparator)
+  def equivalent_to?(other, comparator=nil, error_comparator=nil)
     return false unless other.is_a?(Scientist::Observation)
 
     if raised? || other.raised?
-      return other.exception.class == exception.class &&
-        other.exception.message == exception.message
+      if error_comparator
+        return error_comparator.call(exception, other.exception)
+      else
+        return other.exception.class == exception.class &&
+          other.exception.message == exception.message
+      end
     end
 
     if comparator

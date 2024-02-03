@@ -1,3 +1,3 @@
 module Scientist
-  VERSION = "1.2.0"
+  VERSION = '1.6.4'
 end

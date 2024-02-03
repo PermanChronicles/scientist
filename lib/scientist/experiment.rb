@@ -9,16 +9,26 @@ module Scientist::Experiment
   # If this is nil, raise_on_mismatches class attribute is used instead.
   attr_accessor :raise_on_mismatches
 
-  # Create a new instance of a class that implements the Scientist::Experiment
-  # interface.
-  #
-  # Override this method directly to change the default implementation.
+  def self.included(base)
+    self.set_default(base) if base.instance_of?(Class)
+    base.extend RaiseOnMismatch
+  end
+
+  # Instantiate a new experiment (using the class given to the .set_default method).
   def self.new(name)
-    Scientist::Default.new(name)
+    (@experiment_klass || Scientist::Default).new(name)
+  end
+
+  # Configure Scientist to use the given class for all future experiments
+  # (must implement the Scientist::Experiment interface).
+  #
+  # Called automatically when new experiments are defined.
+  def self.set_default(klass)
+    @experiment_klass = klass
   end
 
   # A mismatch, raised when raise_on_mismatches is enabled.
-  class MismatchError < StandardError
+  class MismatchError < Exception
     attr_reader :name, :result
 
     def initialize(name, result)
@@ -41,10 +51,15 @@ module Scientist::Experiment
     def format_observation(observation)
       observation.name + ":\n" +
       if observation.raised?
-        "  " + observation.exception.inspect + "\n" +
+          arthur/do-not-use-prepend
+          "  " + observation.exception.inspect + "\n" +
           observation.exception.backtrace.map { |line| "    " + line }.join("\n")
       else
         "  " + observation.cleaned_value.inspect
+            lines = observation.exception.backtrace.map { |line| "    #{line}" }.join("\n")
+        "  #{observation.exception.inspect}" + "\n" + lines
+      else
+        "  #{observation.cleaned_value.inspect}"
       end
     end
   end
@@ -67,10 +82,6 @@ module Scientist::Experiment
     end
   end
 
-  def self.included(base)
-    base.extend RaiseOnMismatch
-  end
-
   # Define a block of code to run before an experiment begins, if the experiment
   # is enabled.
   #
@@ -79,6 +90,16 @@ module Scientist::Experiment
   # Returns the configured block.
   def before_run(&block)
     @_scientist_before_run = block
+  end
+
+  # Define a block of code to run after an experiment completes, if the experiment
+  # is enabled.
+  #
+  # The block takes one argument, the Scientist::Result containing experiment results.
+  #
+  # Returns the configured block.
+  def after_run(&block)
+    @_scientist_after_run = block
   end
 
   # A Hash of behavior blocks, keyed by String name. Register behavior blocks
@@ -94,6 +115,13 @@ module Scientist::Experiment
   # Returns the configured block.
   def clean(&block)
     @_scientist_cleaner = block
+  end
+
+  # Accessor for the clean block, if one is available.
+  #
+  # Returns the configured block, or nil.
+  def cleaner
+    @_scientist_cleaner
   end
 
   # Internal: Clean a value with the configured clean block, or return the value
@@ -119,6 +147,16 @@ module Scientist::Experiment
   # Returns the block.
   def compare(*args, &block)
     @_scientist_comparator = block
+  end
+
+  # A block which compares two experimental errors.
+  #
+  # The block must take two arguments, the control Error and a candidate Error,
+  # and return true or false.
+  #
+  # Returns the block.
+  def compare_errors(*args, &block)
+    @_scientist_error_comparator = block
   end
 
   # A Symbol-keyed Hash of extra experiment data.
@@ -164,13 +202,9 @@ module Scientist::Experiment
     "experiment"
   end
 
-  # Internal: compare two observations, using the configured compare block if present.
+  # Internal: compare two observations, using the configured compare and compare_errors lambdas if present.
   def observations_are_equivalent?(a, b)
-    if @_scientist_comparator
-      a.equivalent_to?(b, &@_scientist_comparator)
-    else
-      a.equivalent_to? b
-    end
+    a.equivalent_to? b, @_scientist_comparator, @_scientist_error_comparator
   rescue StandardError => ex
     raised :compare, ex
     false
@@ -209,16 +243,11 @@ module Scientist::Experiment
       @_scientist_before_run.call
     end
 
-    observations = []
+    result = generate_result(name)
 
-    behaviors.keys.shuffle.each do |key|
-      block = behaviors[key]
-      observations << Scientist::Observation.new(key, self, &block)
+    if @_scientist_after_run
+      @_scientist_after_run.call(result)
     end
-
-    control = observations.detect { |o| o.name == name }
-
-    result = Scientist::Result.new self, observations, control
 
     begin
       publish(result)
@@ -234,11 +263,9 @@ module Scientist::Experiment
       end
     end
 
-    if control.raised?
-      raise control.exception
-    else
-      control.value
-    end
+    control = result.control
+    raise control.exception if control.raised?
+    control.value
   end
 
   # Define a block that determines whether or not the experiment should run.
@@ -289,5 +316,41 @@ module Scientist::Experiment
     else
       !!raise_on_mismatches
     end
+  end
+
+  # Provide predefined durations to use instead of actual timing data.
+  # This is here solely as a convenience for developers of libraries that extend Scientist.
+  def fabricate_durations_for_testing_purposes(fabricated_durations = {})
+    @_scientist_fabricated_durations = fabricated_durations
+  end
+
+  # Internal: Generate the observations and create the result from those and the control.
+  def generate_result(name)
+    observations = []
+
+    behaviors.keys.shuffle.each do |key|
+      block = behaviors[key]
+      fabricated_duration = @_scientist_fabricated_durations && @_scientist_fabricated_durations[key]
+      observations << Scientist::Observation.new(key, self, fabricated_duration: fabricated_duration, &block)
+    end
+
+    control = observations.detect { |o| o.name == name }
+    Scientist::Result.new(self, observations, control)
+  end
+
+  private
+
+  # In order to support marshaling, we have to make the procs marshalable. Some
+  # CI providers attempt to marshal Scientist mismatch errors so that they can
+  # be sent out to different places (logs, etc.) The mismatch errors contain
+  # code from the experiment. This code contains procs. These procs prevent the
+  # error from being marshaled. To fix this, we simple exclude the procs from
+  # the data that we marshal.
+  def marshal_dump
+    [@name, @result, @raise_on_mismatches]
+  end
+
+  def marshal_load
+    @name, @result, @raise_on_mismatches = array
   end
 end

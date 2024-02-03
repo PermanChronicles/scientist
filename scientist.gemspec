@@ -10,7 +10,7 @@ Gem::Specification.new do |gem|
   gem.homepage      = "https://github.com/github/scientist"
   gem.license       = "MIT"
 
-  gem.required_ruby_version = '>= 2.1'
+  gem.required_ruby_version = '>= 2.3'
 
   gem.files         = `git ls-files`.split($/)
   gem.executables   = []
@@ -18,5 +18,5 @@ Gem::Specification.new do |gem|
   gem.require_paths = ["lib"]
 
   gem.add_development_dependency "minitest", "~> 5.8"
-  gem.add_development_dependency "coveralls", "~> 0.8"
+  gem.add_development_dependency "rake"
 end

@@ -1,6 +1,6 @@
 # Scientist!
 
-A Ruby library for carefully refactoring critical paths. [![Build Status](https://travis-ci.org/github/scientist.svg?branch=master)](https://travis-ci.org/github/scientist) [![Coverage Status](https://coveralls.io/repos/github/github/scientist/badge.svg?branch=master)](https://coveralls.io/github/github/scientist?branch=master)
+A Ruby library for carefully refactoring critical paths. [![Build Status](https://github.com/github/scientist/actions/workflows/ci.yml/badge.svg)](https://github.com/github/scientist/actions/workflows/ci.yml)
 
 ## How do I science?
 
@@ -24,9 +24,9 @@ Wrap a `use` block around the code's original behavior, and wrap `try` around th
 
 * It decides whether or not to run the `try` block,
 * Randomizes the order in which `use` and `try` blocks are run,
-* Measures the durations of all behaviors,
+* Measures the durations of all behaviors in seconds,
 * Compares the result of `try` to the result of `use`,
-* Swallows (but records) any exceptions raised in the `try` block, and
+* Swallow and record exceptions raised in the `try` block when overriding `raised`, and
 * Publishes all this information.
 
 The `use` block is called the **control**. The `try` block is called the **candidate**.
@@ -62,7 +62,7 @@ class MyExperiment
 
   attr_accessor :name
 
-  def initialize(name:)
+  def initialize(name)
     @name = name
   end
 
@@ -71,19 +71,20 @@ class MyExperiment
     true
   end
 
+  def raised(operation, error)
+    # see "In a Scientist callback" below
+    p "Operation '#{operation}' failed with error '#{error.inspect}'"
+    super # will re-raise
+  end
+
   def publish(result)
     # see "Publishing results" below
     p result
   end
 end
-
-# replace `Scientist::Default` as the default implementation
-module Scientist::Experiment
-  def self.new(name)
-    MyExperiment.new(name: name)
-  end
-end
 ```
+
+When `Scientist::Experiment` is included in a class, it automatically sets it as the default implementation via `Scientist::Experiment.set_default`. This `set_default` call is skipped if you include `Scientist::Experiment` in a module.
 
 Now calls to the `science` helper will load instances of `MyExperiment`.
 
@@ -102,6 +103,38 @@ class MyWidget
 
       e.compare do |control, candidate|
         control.map(&:login) == candidate.map(&:login)
+      end
+    end
+  end
+end
+```
+
+If either the control block or candidate block raises an error, Scientist compares the two observations' classes and messages using `==`. To override this behavior, use `compare_errors` to define how to compare observed errors instead:
+
+```ruby
+class MyWidget
+  include Scientist
+
+  def slug_from_login(login)
+    science "slug_from_login" do |e|
+      e.use { User.slug_from_login login }         # returns String instance or ArgumentError
+      e.try { UserService.slug_from_login login }  # returns String instance or ArgumentError
+
+      compare_error_message_and_class = -> (control, candidate) do
+        control.class == candidate.class && 
+        control.message == candidate.message
+      end
+
+      compare_argument_errors = -> (control, candidate) do
+        control.class == ArgumentError &&
+        candidate.class == ArgumentError &&
+        control.message.start_with?("Input has invalid characters") &&
+        candidate.message.start_with?("Invalid characters in input") 
+      end
+
+      e.compare_errors do |control, candidate|
+        compare_error_message_and_class.call(control, candidate) ||
+        compare_argument_errors.call(control, candidate)
       end
     end
   end
@@ -206,6 +239,21 @@ class MyExperiment
 end
 ```
 
+Note that the `#clean` method will discard the previous cleaner block if you call it again.  If for some reason you need to access the currently configured cleaner block, `Scientist::Experiment#cleaner` will return the block without further ado.  _(This probably won't come up in normal usage, but comes in handy if you're writing, say, a custom experiment runner that provides default cleaners.)_
+
+The `#clean` method will not be used for comparison of the results, so in the following example it is not possible to remove the `#compare` method without the experiment failing:
+
+```ruby
+def user_ids
+  science "user_ids" do
+    e.use { [1,2,3] }
+    e.try { [1,3,2] }
+    e.clean { |value| value.sort }
+    e.compare { |a, b| a.sort == b.sort }
+  end
+end
+```
+
 ### Ignoring mismatches
 
 During the early stages of an experiment, it's possible that some of your code will always generate a mismatch for reasons you know and understand but haven't yet fixed. Instead of these known cases always showing up as mismatches in your metrics or analysis, you can tell an experiment whether or not to ignore a mismatch using the `ignore` method. You may include more than one block if needed:
@@ -225,7 +273,7 @@ def admin?(user)
 end
 ```
 
-The ignore blocks are only called if the *values* don't match. If one observation raises an exception and the other doesn't, it's always considered a mismatch. If both observations raise different exceptions, that is also considered a mismatch.
+The ignore blocks are only called if the *values* don't match. Unless a `compare_errors` comparator is defined, two cases are considered mismatches: a) one observation raising an exception and the other not, b) observations raising exceptions with different classes or messages.
 
 ### Enabling/disabling experiments
 
@@ -254,7 +302,7 @@ class MyExperiment
 
   attr_accessor :name, :percent_enabled
 
-  def initialize(name:)
+  def initialize(name)
     @name = name
     @percent_enabled = 100
   end
@@ -392,6 +440,8 @@ Scientist rescues and tracks _all_ exceptions raised in a `try` or `use` block, 
 Scientist::Observation::RESCUES.replace [StandardError]
 ```
 
+**Timeout ⏲️**: If you're introducing a candidate that could possibly timeout, use caution. ⚠️ While Scientist rescues all exceptions that occur in the candidate block, it *does not* protect you from timeouts, as doing so would be complicated. It would likely require running the candidate code in a background job and tracking the time of a request. We feel the cost of this complexity would outweigh the benefit, so make sure that your code doesn't cause timeouts. This risk can be reduced by running the experiment on a low percentage so that users can (most likely) bypass the experiment by refreshing the page if they hit a timeout. See [Ramping up experiments](#ramping-up-experiments) below for how details on how to set the percentage for your experiment.
+
 #### In a Scientist callback
 
 If an exception is raised within any of Scientist's internal helpers, like `publish`, `compare`, or `clean`, the `raised` method is called with the symbol name of the internal operation that failed and the exception that was raised. The default behavior of `Scientist::Default` is to simply re-raise the exception. Since this halts the experiment entirely, it's often a better idea to handle this error and continue so the experiment as a whole isn't canceled entirely:
@@ -491,6 +541,22 @@ science "various-ways", run: "first-way" do |e|
 end
 ```
 
+#### Providing fake timing data
+
+If you're writing tests that depend on specific timing values, you can provide canned durations using the `fabricate_durations_for_testing_purposes` method, and Scientist will report these in `Scientist::Observation#duration` instead of the actual execution times.
+
+```ruby
+science "absolutely-nothing-suspicious-happening-here" do |e|
+  e.use { ... } # "control"
+  e.try { ... } # "candidate"
+  e.fabricate_durations_for_testing_purposes( "control" => 1.0, "candidate" => 0.5 )
+end
+```
+
+`fabricate_durations_for_testing_purposes` takes a Hash of duration values, keyed by behavior names.  (By default, Scientist uses `"control"` and `"candidate"`, but if you override these as shown in [Trying more than one thing](#trying-more-than-one-thing) or [No control, just candidates](#no-control-just-candidates), use matching names here.)  If a name is not provided, the actual execution time will be reported instead.
+
+_Like `Scientist::Experiment#cleaner`, this probably won't come up in normal usage.  It's here to make it easier to test code that extends Scientist._
+
 ### Without including Scientist
 
 If you need to use Scientist in a place where you aren't able to include the Scientist module, you can call `Scientist.run`:
@@ -504,7 +570,11 @@ end
 
 ## Hacking
 
-Be on a Unixy box. Make sure a modern Bundler is available. `script/test` runs the unit tests. All development dependencies are installed automatically. Scientist requires Ruby 2.1 or newer.
+Be on a Unixy box. Make sure a modern Bundler is available. `script/test` runs the unit tests. All development dependencies are installed automatically. Scientist requires Ruby 2.3 or newer.
+
+## Wrappers
+
+- [RealGeeks/lab_tech](https://github.com/RealGeeks/lab_tech) is a Rails engine for using this library by controlling, storing, and analyzing experiment results with ActiveRecord.
 
 ## Alternatives
 
@@ -515,6 +585,8 @@ Be on a Unixy box. Make sure a modern Bundler is available. `script/test` runs t
 - [tomiaijo/scientist](https://github.com/tomiaijo/scientist) (C++)
 - [trello/scientist](https://github.com/trello/scientist) (node.js)
 - [ziyasal/scientist.js](https://github.com/ziyasal/scientist.js) (node.js, ES6)
+- [TrueWill/tzientist](https://github.com/TrueWill/tzientist) (node.js, TypeScript)
+- [TrueWill/paleontologist](https://github.com/TrueWill/paleontologist) (Deno, TypeScript)
 - [yeller/laboratory](https://github.com/yeller/laboratory) (Clojure)
 - [lancew/Scientist](https://github.com/lancew/Scientist) (Perl 5)
 - [lancew/ScientistP6](https://github.com/lancew/ScientistP6) (Perl 6)
@@ -524,7 +596,9 @@ Be on a Unixy box. Make sure a modern Bundler is available. `script/test` runs t
 - [jelmersnoeck/experiment](https://github.com/jelmersnoeck/experiment) (Go)
 - [spoptchev/scientist](https://github.com/spoptchev/scientist) (Kotlin / Java)
 - [junkpiano/scientist](https://github.com/junkpiano/scientist) (Swift)
-
+- [serverless scientist](http://serverlessscientist.com/) (AWS Lambda)
+- [fightmegg/scientist](https://github.com/fightmegg/scientist) (TypeScript, Browser / Node.js)
+- [MisterSpex/misterspex-scientist](https://github.com/MisterSpex/misterspex-scientist) (Java, no dependencies)
 
 ## Maintainers
 

@@ -2,6 +2,9 @@ describe Scientist::Experiment do
   class Fake
     include Scientist::Experiment
 
+    # Undo auto-config magic / preserve default behavior of Scientist::Experiment.new
+    Scientist::Experiment.set_default(nil)
+
     def initialize(*args)
     end
 
@@ -26,6 +29,24 @@ describe Scientist::Experiment do
 
   before do
     @ex = Fake.new
+  end
+
+  it "sets the default on inclusion" do
+    klass = Class.new do
+      include Scientist::Experiment
+
+      def initialize(name)
+      end
+    end
+
+    assert_kind_of klass, Scientist::Experiment.new("hello")
+
+    Scientist::Experiment.set_default(nil)
+  end
+
+  it "doesn't set the default on inclusion when it's a module" do
+    Module.new { include Scientist::Experiment }
+    assert_kind_of Scientist::Default, Scientist::Experiment.new("hello")
   end
 
   it "has a default implementation" do
@@ -180,6 +201,18 @@ describe Scientist::Experiment do
     assert @ex.published_result.matched?
   end
 
+  it "compares errors with an error comparator block if provided" do
+    @ex.compare_errors { |a, b| a.class == b.class }
+    @ex.use { raise "foo" }
+    @ex.try { raise "bar" }
+
+    resulting_error = assert_raises RuntimeError do
+      @ex.run
+    end
+    assert_equal "foo", resulting_error.message
+    assert @ex.published_result.matched?
+  end
+
   it "knows how to compare two experiments" do
     a = Scientist::Observation.new(@ex, "a") { 1 }
     b = Scientist::Observation.new(@ex, "b") { 2 }
@@ -237,6 +270,13 @@ describe Scientist::Experiment do
 
   it "returns the given value when no clean block is configured" do
     assert_equal 10, @ex.clean_value(10)
+  end
+
+  it "provides the clean block when asked for it, in case subclasses wish to override and provide defaults" do
+    assert_nil @ex.cleaner
+    cleaner = ->(value) { value.upcase }
+    @ex.clean(&cleaner)
+    assert_equal cleaner, @ex.cleaner
   end
 
   it "calls the configured clean block with a value when configured" do
@@ -437,6 +477,41 @@ describe Scientist::Experiment do
       assert_raises(Scientist::Experiment::MismatchError) { @ex.run }
     end
 
+    it "allows MismatchError to bubble up through bare rescues" do
+      Fake.raise_on_mismatches = true
+      @ex.use { "control" }
+      @ex.try { "candidate" }
+      runner = -> {
+        begin
+          @ex.run
+        rescue
+          # StandardError handled
+        end
+      }
+      assert_raises(Scientist::Experiment::MismatchError) { runner.call }
+    end
+
+    it "can be marshaled" do
+      Fake.raise_on_mismatches = true
+      @ex.before_run { "some block" }
+      @ex.clean { "some block" }
+      @ex.compare_errors { "some block" }
+      @ex.ignore { false }
+      @ex.run_if { "some block" }
+      @ex.try { "candidate" }
+      @ex.use { "control" }
+      @ex.compare { |control, candidate| control == candidate }
+
+      mismatch = nil
+      begin
+        @ex.run
+      rescue Scientist::Experiment::MismatchError => e
+        mismatch = e
+      end
+
+      assert_kind_of(String, Marshal.dump(mismatch))
+    end
+
     describe "#raise_on_mismatches?" do
       it "raises when there is a mismatch if the experiment instance's raise on mismatches is enabled" do
         Fake.raise_on_mismatches = false
@@ -525,7 +600,7 @@ candidate:
         assert_equal "  \"value\"", lines[2]
         assert_equal "candidate:", lines[3]
         assert_equal "  #<RuntimeError: error>", lines[4]
-        assert_match %r(    test/scientist/experiment_test.rb:\d+:in `block), lines[5]
+        assert_match %r(test/scientist/experiment_test.rb:\d+:in `block), lines[5]
       end
     end
   end
@@ -557,6 +632,65 @@ candidate:
       @ex.run
 
       refute before, "before_run should not have run"
+    end
+  end
+
+  describe "after run block" do
+    it "runs when an experiment is enabled" do
+      control_ok = candidate_ok = false
+      after_result = nil
+      @ex.after_run { |result| after_result = result }
+      @ex.use { control_ok = after_result.nil? }
+      @ex.try { candidate_ok = after_result.nil? }
+
+      @ex.run
+
+      assert after_result, "after_run should have run"
+      assert after_result.matched?, "after_run should be called with the result"
+      assert control_ok, "control should have run before after_run"
+      assert candidate_ok, "candidate should have run before after_run"
+    end
+
+    it "does not run when an experiment is disabled" do
+      after_result = nil
+
+      def @ex.enabled?
+        false
+      end
+      @ex.after_run { |result| after_result = result }
+      @ex.use { "value" }
+      @ex.try { "value" }
+      @ex.run
+
+      refute after_result, "after_run should not have run"
+    end
+  end
+
+  describe "testing hooks for extending code" do
+    it "allows a user to provide fabricated durations for testing purposes" do
+      @ex.use { true }
+      @ex.try { true }
+      @ex.fabricate_durations_for_testing_purposes( "control" => 0.5, "candidate" => 1.0 )
+
+      @ex.run
+
+      cont = @ex.published_result.control
+      cand = @ex.published_result.candidates.first
+      assert_in_delta 0.5, cont.duration, 0.01
+      assert_in_delta 1.0, cand.duration, 0.01
+    end
+
+    it "returns actual durations if fabricated ones are omitted for some blocks" do
+      @ex.use { true }
+      @ex.try { sleep 0.1; true }
+      @ex.fabricate_durations_for_testing_purposes( "control" => 0.5 )
+
+      @ex.run
+
+      cont = @ex.published_result.control
+      cand = @ex.published_result.candidates.first
+      assert_in_delta 0.5, cont.duration, 0.01
+      assert_in_delta 0.1, cand.duration, 0.01
     end
   end
 end

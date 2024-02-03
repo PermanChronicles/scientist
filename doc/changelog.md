@@ -1,5 +1,12 @@
 # Changes
 
+## v1.3.0 (2 April 2019)
+
+- New: Drop support for ruby <2.3
+- Fix: Build new strings instead of modifying frozen ones
+- New: Add an accessor for the configured clean block
+- New: Add a hook to use fabricated durations instead of actual timing data.
+
 ## v1.2.0 (5 July 2018)
 
 - New: Use monotonic clock for duration calculations
